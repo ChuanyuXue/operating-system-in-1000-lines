@@ -7,6 +7,7 @@ import {
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
+  base: '/os1000/',
   title: "OS in 1,000 Lines",
   description: "Write your first operating system from scratch, in 1K LoC.",
   cleanUrls: true,
