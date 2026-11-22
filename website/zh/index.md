@@ -2,21 +2,24 @@
 title: 简介
 ---
 
-# 1000 行代码的操作系统
+# 用 Rust 写一个运行在 AArch64 上的小型操作系统
 
-在这本书里，我们将会从零开始一步一步去构建一个小型操作系统。
+这本教程改编自 Seiya Nuta 的《Operating System in 1,000 Lines》。原书用 C 为 32 位 RISC-V 实现了一个小型操作系统。我们会沿着原书的章节顺序，用 Rust 重新实现这个系统，并让它在 QEMU 模拟的 AArch64（64 位 Arm）机器上运行。
 
-当听到操作系统开发或者是内核开发的时候，你可能会觉得很吓人，但其实操作系统（尤其是内核）的基础函数是出奇的简单的。哪怕是经常被认为是大型开源操作系统的 Linux，在版本 0.01 的时候它也只有 8413 行代码。当今的 Linux 内核已经变得非常庞大，但它最开始就像你的个人兴趣项目一般只是一个很小的代码库。
+## 原书与参考代码
 
-我们将会用 C 语言来实现基础的上下文切换、分页、用户态、命令行 shell、磁盘驱动以及文件读写操作。听起来很复杂，但它仅有 1000 代码！
+原书从内核启动讲起，逐步加入进程、虚拟内存、系统调用和文件系统。你可以对照原书阅读每一章，也可以直接查看对应的 C 实现。
 
-有一件事你需要谨记，它也并没有你想象中简单。实现一个操作系统过程中最棘手的是调试，因为在你实现 `printf` 之前你是没有办法用它来调试的。你需要学习一些你在应用开发中用不上的调试技术和技巧。尤其是当你“从零开始”，你会遇到许多困难，例如启动进程和分页。但是别担心，我们也将会学到“如何调试一个操作系统”！
+- [原书英文版](https://1000os.seiya.me/en/)
+- [原书简体中文版](https://1000os.seiya.me/zh/)，由 YianAndCode 翻译
+- [原书仓库与 C 参考实现](https://github.com/nuta/operating-system-in-1000-lines)，其中的 `kernel.c` 是内核源码，`run.sh` 展示了如何编译并启动它
 
-调试越困难，调通后你的成就感就会越强烈。让我们进入激动人心的操作系统开发世界吧！
+原书正文采用 CC BY 4.0 许可，示例代码采用 MIT 许可。详见[原书许可说明](https://github.com/nuta/operating-system-in-1000-lines/blob/main/LICENCE.md)。
 
- - 你可以在 [GitHub](https://github.com/nuta/operating-system-in-1000-lines) 下载示例代码。
- - 这本书是基于 [CC BY 4.0 license](https://creativecommons.jp/faq) 协议的。书中的示例和代码是基于 [MIT license](https://opensource.org/licenses/MIT) 协议的。
- - 阅读本书要求你熟悉 C 语言和类 UNIX 环境。如果你已经会 `gcc hello.c && ./a.out`，那么你可以放心大胆地继续阅读了。
- - 这本书原本是作为我的书 *[Design and Implementation of Microkernels](https://www.shuwasystem.co.jp/book/9784798068718.html)* （日文）的附录而写的。
+## 我们要移植什么
 
-Happy OS hacking!
+第一个里程碑是让内核打印一行 `Hello, World!`。在 Rust 这一侧，我们会用 `#![no_std]` 编写裸机程序，让内核在没有宿主操作系统和标准输出的情况下运行。在 AArch64 这一侧，我们会编写启动代码，设置栈指针，把控制权交给 Rust，再通过 QEMU 虚拟机的串口输出这行文字。
+
+同样的分工会贯穿后面的章节。例如，讲到分页时，我们仍然要解决原书里的问题：怎样把虚拟地址映射到物理内存？我们会用 Rust 表示页表项，并按 AArch64 的页表格式填写它们。
+
+本书正在逐章改写。后续章节中仍可看到原书的 C 代码和 RISC-V 命令；对应的 Rust 实现和 AArch64 运行步骤会随移植进度更新。你可以在[本书的 GitHub 仓库](https://github.com/ChuanyuXue/operating-system-in-1000-lines)查看进展。
