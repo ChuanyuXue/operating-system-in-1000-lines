@@ -1,5 +1,5 @@
 [workspace]
-members = ["kernel"]
+members = ["kernel", "common"]
 resolver = "3"
 
 [profile.release]

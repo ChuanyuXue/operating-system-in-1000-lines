@@ -2,11 +2,12 @@
 #![no_main]
 
 mod console;
-mod name;
 mod uart;
 
+use common::{memcpy, memset, strcmp, strcpy};
 use console::Console;
 use core::arch::{asm, global_asm};
+use core::ffi::CStr;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
@@ -43,18 +44,22 @@ pub extern "C" fn kernel_main() -> ! {
     )
     .unwrap();
 
-    let mut field = [0xa5; 12];
-    let len = name::copy_name(&mut field, "hello.txt").unwrap();
-    writeln!(console, "name field: {field:02x?}").unwrap();
+    let mut buf = [0; 6];
+    memset(&mut buf, 0xa5);
+    memcpy(&mut buf[..3], b"abc");
+    writeln!(console, "memcpy + memset: {buf:02x?}").unwrap();
 
-    let stored = core::str::from_utf8(&field[..len]).unwrap();
-    writeln!(console, "{stored} == hello.txt: {}", stored == "hello.txt").unwrap();
-    writeln!(
-        console,
-        "{stored} cmp meow.txt: {:?}",
-        stored.cmp("meow.txt")
-    )
-    .unwrap();
+    strcpy(&mut buf, c"hi").unwrap();
+    writeln!(console, "strcpy: {buf:02x?}").unwrap();
+    let copied = CStr::from_bytes_until_nul(&buf).unwrap();
+    for other in [c"hi", c"hit", c"he"] {
+        writeln!(
+            console,
+            "strcmp({copied:?}, {other:?}) = {}",
+            strcmp(copied, other)
+        )
+        .unwrap();
+    }
 
     loop {
         // 在内核中等待事件。被唤醒后继续等待。

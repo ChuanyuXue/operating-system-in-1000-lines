@@ -47,7 +47,7 @@ export default defineConfig({
         { link: '/zh/03-overview', text: '03. 总览' },
         { link: '/zh/04-boot', text: '04. 引导' },
         { link: '/zh/05-hello-world', text: '05. Hello World!' },
-        { link: '/zh/06-libc', text: '06. Rust 核心库' },
+        { link: '/zh/06-libc', text: '06. 用 Rust 实现 libc 基础函数' },
         { link: '/zh/07-kernel-panic', text: '07. 内核恐慌（Kernel Panic）' },
         { link: '/zh/08-exception', text: '08. 异常' },
         { link: '/zh/09-memory-allocation', text: '09. 内存分配' },

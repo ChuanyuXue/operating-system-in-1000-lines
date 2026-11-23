@@ -1,12 +1,12 @@
 ---
-title: Rust 核心库
+title: 用 Rust 实现 libc 基础函数
 ---
 
-# Rust 核心库
+# 用 Rust 实现 libc 基础函数
 
-如果把 `hello.txt` 写进一个 12 字节的缓冲区，文件名占几个字节？剩下的位置该放什么？读回来时，又怎样判断它和另一个文件名是否相同？本章沿用第 05 章的内核和串口，用这个例子学习裸机 Rust 里的基本类型、内存操作和字符串操作。
+第 05 章已经能把字节送到串口。这一章来写原书的四个基础函数：用 `memcpy` 复制字节，用 `memset` 填充内存，用 `strcpy` 复制以零结尾的字符串，用 `strcmp` 比较它们。观察同一块缓冲区，就能看出两类复制的区别：复制三个普通字节之后，谁来写字符串末尾的零？
 
-> **与原书对照**　原书在 `common.h` 和 `common.c` 中定义类型，并实现 `memcpy`、`memset`、`strcpy` 和 `strcmp`。我们的内核使用 `#![no_std]`，仍然可以使用 Rust 内置的整数类型，以及 `core` 为切片和字符串提供的方法。上一章用过的 `core::fmt` 也来自这个库。[Rust 核心库文档](https://doc.rust-lang.org/core/)
+> **与原书对照**　原书把这些函数放进 `common.c`，供内核和用户程序共用。这里对应的是一个名为 `common` 的 `#![no_std]` 库。四个函数保留原名，并采用 Rust 调用接口：切片携带缓冲区长度，`&CStr` 表示以零结尾的字节串。
 
 ## 基本类型
 
@@ -35,44 +35,69 @@ writeln!(
 
 一页是 `0x1000` 字节。地址 `0x1234` 落在页内，从这里向上取最近的页边界会得到 `0x2000`。如果起点已经对齐，结果就是起点本身。`checked_next_multiple_of` 在结果溢出或除数为零时返回 `None`，本例中的两个常量可以确定结果存在。检查对齐用 `is_multiple_of`。原书另一个常用宏 `offsetof` 在 Rust 中对应 `core::mem::offset_of!(类型, 字段)`，结果是字段距结构体起点的字节数。[usize 文档](https://doc.rust-lang.org/core/primitive.usize.html#method.checked_next_multiple_of) · [offset_of! 文档](https://doc.rust-lang.org/core/mem/macro.offset_of.html)
 
-## 内存操作
+从第 05 章的工程继续，在根目录的 `Cargo.toml` 中把 `members` 改成 `["kernel", "common"]`，在 `kernel/Cargo.toml` 中追加：
 
-准备一个 12 字节的字段来存放文件名。约定很简单：文件名能放下就复制进去，剩余位置填零，并返回实际复制的字节数。如果放不下，整个字段保持原样。
-
-创建 `kernel/src/name.rs`：
-
-<<< @/../examples/ch06-core/kernel/src/name.rs
-
-`&mut [u8]` 是可写的字节切片，带有长度。`split_at_mut_checked` 先检查容量，再把字段分成两段。第一段和源文件名的字节数相同，可以用 `copy_from_slice` 复制，这一步对应原书的 `memcpy`。第二段用 `fill(0)` 填零，对应 `memset`。文件名过长时，第一行的 `?` 直接返回 `None`，两次写操作都还没开始。[切片方法文档](https://doc.rust-lang.org/core/primitive.slice.html#method.split_at_mut_checked)
-
-在 `kernel/src/main.rs` 的 `mod console;` 旁添加 `mod name;`，再把这三行接在刚才的对齐示例后：
-
-```rust
-let mut field = [0xa5; 12];
-let len = name::copy_name(&mut field, "hello.txt").unwrap();
-writeln!(console, "name field: {field:02x?}").unwrap();
+```toml
+[dependencies]
+common = { path = "../common" }
 ```
 
-初始值特意选了 `0xa5`，这样在串口输出里能看清哪些位置被改写了。`hello.txt` 占 9 字节，因此前 9 字节会变为文件名，最后 3 字节会变为零。如果文件名恰好占满 12 字节，填充部分就是空切片。这种写法适用于已经取得可写切片的普通内存。第 04 章的启动代码则要在使用静态变量之前，按链接器给出的地址清零整个 `.bss`。
+创建 `common/Cargo.toml` 和 `common/src/lib.rs`。后面两个小节会分别补上 `memory.rs` 和 `string.rs`。
+
+<<< @/../examples/ch06-core/common/Cargo.toml
+
+<<< @/../examples/ch06-core/common/src/lib.rs
+
+## 内存操作
+
+原书的 `memcpy(dst, src, n)` 用两个指针逐字节复制。`n` 在 Rust 版本里由切片长度给出：调用方传入要复制的源区间和同样长的目标区间。`memset` 只需要一个目标区间和一个填充值。把这两个函数写进 `common/src/memory.rs`：
+
+<<< @/../examples/ch06-core/common/src/memory.rs
+
+`memcpy` 先核对长度，再把每个源字节写到目标的对应位置。两个切片分别以共享和独占方式借用，安全 Rust 调用方需要给出互不重叠的区间。`memset` 每次写入同一个值。两个循环都能处理空切片。
+
+在 `kernel/src/main.rs` 顶部引入 `use common::{memcpy, memset, strcmp, strcpy};` 和 `use core::ffi::CStr;`。接着在刚才的对齐示例后写：
+
+```rust
+let mut buf = [0; 6];
+memset(&mut buf, 0xa5);
+memcpy(&mut buf[..3], b"abc");
+writeln!(console, "memcpy + memset: {buf:02x?}").unwrap();
+```
+
+填充后六个字节都是 `a5`。复制后，前三个变成 `61 62 63`，也就是 ASCII 的 `abc`。注意第四个字节仍是 `a5`：`memcpy` 只复制指定范围，包括范围内碰到的任何零字节。
+
+> **与原书对照**　原书在这一节还把启动时清零 `.bss` 的 `memset` 移到了公共库。我们的第 04 章用链接器给出的原始地址和 volatile 写入来初始化 `.bss`。本章的 `memset` 接受已取得独占访问权的普通内存切片。启动入口继续使用 `clear_bss()`。
 
 ## 字符串操作
 
-原书的 `strcpy` 会复制到第一个 `'\0'` 为止，并把这个结束符一起写入目标。Rust 的 `&str` 携带 UTF-8 字节长度。刚才保存的 `len` 就是有效文本的长度，因此即使字段恰好写满，也能读回完整文件名。
+在 C 里，复制 `"hi"` 要写三个字节：`68 69 00`。只写前两个字符，读者就无法知道字符串在哪里结束。Rust 可以用 `c"hi"` 写出一个 `&CStr`，编译器会加上末尾的零。下面在 `common/src/string.rs` 实现 `strcpy` 和 `strcmp`：
+
+<<< @/../examples/ch06-core/common/src/string.rs
+
+`strcpy` 先用 `to_bytes()` 取得结束符之前的内容。目标至少要比这些内容多一个字节：能放下就用刚写好的 `memcpy` 复制正文，再亲自写入结尾的零。容量不足时返回 `None`，此时目标尚未被写入。比如 `c"hi"` 正好能放进三字节缓冲区。
+
+`strcmp` 则要把结束符也拿来比较，因此用 `to_bytes_with_nul()`。它逐对比较 `u8`，在第一处不同的位置将两个字节扩大到 `i32` 后相减。这样 `0 - 116` 可以得到负数。如果一路比较到双方的结束符都相同，就返回零。
+
+沿用刚才的六字节缓冲区，接着写：
 
 ```rust
-let stored = core::str::from_utf8(&field[..len]).unwrap();
-writeln!(console, "{stored} == hello.txt: {}", stored == "hello.txt").unwrap();
-writeln!(
-    console,
-    "{stored} cmp meow.txt: {:?}",
-    stored.cmp("meow.txt")
-)
-.unwrap();
+strcpy(&mut buf, c"hi").unwrap();
+writeln!(console, "strcpy: {buf:02x?}").unwrap();
+let copied = CStr::from_bytes_until_nul(&buf).unwrap();
+for other in [c"hi", c"hit", c"he"] {
+    writeln!(
+        console,
+        "strcmp({copied:?}, {other:?}) = {}",
+        strcmp(copied, other)
+    )
+    .unwrap();
+}
 ```
 
-`from_utf8` 检查这段字节是否是有效的 UTF-8。本例中的字节刚从一个 `&str` 完整复制过来，所以可以 `unwrap()`。比较两个名字是否相等直接用 `==`。如果还关心顺序，`cmp` 会返回 `Less`、`Equal` 或 `Greater`，对应 C 的 `strcmp` 返回负数、零或正数。这里第一个不同的字节是 `h` 和 `m`，因此结果是 `Less`。[Rust 字符串文档](https://doc.rust-lang.org/core/primitive.str.html)
+`CStr::from_bytes_until_nul` 把缓冲区开头一直到第一个零的部分作为一个 C 字符串。后面的三个 `a5` 仍在内存里，但不参与比较。和原书一样，调用方可以用 `strcmp(a, b) == 0` 判断相等，用结果的正负判断顺序。
 
-现在从工程目录启动 QEMU。想直接运行完整示例，可以进入教程仓库的 `examples/ch06-core/`。[本章完整源码](https://github.com/ChuanyuXue/operating-system-in-1000-lines/tree/main/examples/ch06-core)
+在工程目录运行下面的命令，也可以从教程仓库根目录进入 `examples/ch06-core/` 运行完整示例。[本章源码](https://github.com/ChuanyuXue/operating-system-in-1000-lines/tree/main/examples/ch06-core)
 
 ```sh
 sh run.sh
@@ -84,18 +109,12 @@ Hello World!
 1 + 2 = 3, 1234abcd
 usize: 64 bits
 0x1234 -> 0x2000, aligned: true
-name field: [68, 65, 6c, 6c, 6f, 2e, 74, 78, 74, 00, 00, 00]
-hello.txt == hello.txt: true
-hello.txt cmp meow.txt: Less
+memcpy + memset: [61, 62, 63, a5, a5, a5]
+strcpy: [68, 69, 00, a5, a5, a5]
+strcmp("hi", "hi") = 0
+strcmp("hi", "hit") = -116
+strcmp("hi", "he") = 4
 ```
 :::
 
-可以把文件名改成 `"你好.txt"` 再运行一次。两个汉字各占 3 个 UTF-8 字节，加上 `.txt`，总共 10 字节。观察字段末尾还剩几个零，以及和 `"hello.txt"` 比较的结果。
-
-::: details 查看运行结果（仅将传给 copy_name 的文件名改为“你好.txt”，串口节选）
-```text
-name field: [e4, bd, a0, e5, a5, bd, 2e, 74, 78, 74, 00, 00]
-你好.txt == hello.txt: false
-你好.txt cmp meow.txt: Greater
-```
-:::
+为什么是 `-116`？前两个字节 `h` 和 `i` 都相同，第三次比较遇到左侧的结束符 `0` 和右侧的 `t`（116）。这正是前缀字符串排在较长字符串前面的原因。
