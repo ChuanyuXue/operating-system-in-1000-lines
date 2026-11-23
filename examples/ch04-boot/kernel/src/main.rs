@@ -11,24 +11,32 @@ global_asm!(
 boot:
     ldr x0, =__stack_top
     mov sp, x0
-
-    ldr x0, =__bss_start
-    ldr x1, =__bss_end
-1:
-    cmp x0, x1
-    b.hs 2f
-    strb wzr, [x0], #1
-    b 1b
-2:
     b kernel_main
 "#
 );
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
+    // boot 已设置好栈，当前只有一个核心，尚未使用 .bss 中的静态变量。
+    unsafe { clear_bss() };
+
     loop {
         // 在内核中等待事件。被唤醒后继续等待。
         unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)) }
+    }
+}
+
+// 只能在启动时、首次使用静态变量之前调用。
+unsafe fn clear_bss() {
+    unsafe extern "C" {
+        static mut __bss_start: u8;
+        static mut __bss_end: u8;
+    }
+
+    let start = &raw mut __bss_start as usize;
+    let end = &raw mut __bss_end as usize;
+    for addr in start..end {
+        unsafe { (addr as *mut u8).write_volatile(0) };
     }
 }
 

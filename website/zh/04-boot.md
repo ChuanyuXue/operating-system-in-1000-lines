@@ -62,21 +62,25 @@ PSTATE=00000000400003c5 -Z-- EL1h    FPU disabled
 
 ### 内核入口点
 
-`ldr x0, =__stack_top` 把栈顶地址放进 `x0`，`mov sp, x0` 设置栈指针。第 02 章里，函数在栈上保存返回地址时会先减小 `sp`，所以这里从栈的高地址端开始。准备工作做完后，`b kernel_main` 跳入 Rust。`kernel_main` 的返回类型是 `!`，因此启动代码无需保存返回地址。
+`ldr x0, =__stack_top` 把栈顶地址放进 `x0`，`mov sp, x0` 设置栈指针。栈向低地址增长，所以这里从栈的高地址端开始。普通 Rust 函数可能在执行第一行代码之前就使用栈，因此这两条指令要放在汇编入口。第三条指令 `b kernel_main` 跳入 Rust。`kernel_main` 的返回类型是 `!`，启动代码无需保存返回地址。
 
 ### 怎样定义启动代码
 
 `#![no_std]` 让内核使用 `core`，`#![no_main]` 让我们自己安排入口。`global_asm!` 把汇编直接放进目标文件。`.section .text.boot, "ax"` 选中可装入内存、可执行的代码段，`.global boot` 将入口符号交给链接器。`#[unsafe(no_mangle)]` 保留 `kernel_main` 这个符号名，使汇编里的跳转能找到它。
 
-Rust 还要求裸机程序提供 `#[panic_handler]`。暂时没有输出设备，示例在 panic 时原地循环。正常路径进入 `kernel_main`，执行 `wfe`（等待事件），被唤醒后继续等待。
+Rust 还要求裸机程序提供 `#[panic_handler]`。暂时没有输出设备，示例在 panic 时原地循环。正常路径进入 `kernel_main` 后，先调用 `clear_bss()`，再循环执行 `wfe`（等待事件），被唤醒后继续等待。
 
 ### 取链接器符号的地址
 
-`__bss_start`、`__bss_end` 和 `__stack_top` 都是链接器给地址起的名字。`ldr x0, =__bss_start` 是汇编器提供的伪指令，它把符号的**地址**装进寄存器。第 02 章写过的 `ldr w0, [x1]` 则会访问 `x1` 指向的内存，读出那里的**内容**。
+`__bss_start` 和 `__bss_end` 由链接器定义。Rust 通过 `unsafe extern "C"` 声明这两个外部符号，再用 `&raw mut __bss_start` 和 `&raw mut __bss_end` 取得它们的地址。取地址不会读取内存，所以即使结束符号指向段末尾之后，也可以用它来标记循环边界。
 
 ### 初始化 .bss
 
-清零循环处理半开区间 `[__bss_start, __bss_end)`。每轮先比较两个地址，到达末尾就跳到 `2:`。`strb wzr, [x0], #1` 写入一个零字节，再把地址加一。`1b` 表示往回找最近的 `1:`，`2f` 表示往前找下一个 `2:`。当前示例没有需要清零的静态变量，两端地址相等，第一次比较就会退出。
+`clear_bss()` 遍历半开区间 `start..end`。每轮用 `write_volatile(0)` 向当前地址写一个零字节，让编译器保留这次写入。最后写入的是地址 `end - 1`。如果区间为空，循环执行零次，本章示例就属于这种情况。
+
+这里的 `unsafe` 依赖两个启动条件：链接器划出的区间是可写 RAM，而且此时只有一个核心在运行，还没有代码开始使用这些静态变量。因此 `kernel_main` 把清零放在第一步。
+
+> **与原书对照**　原书的汇编入口负责设置栈并跳到 C 函数，随后由 C 代码清零 `.bss`。这里保留相同的分工，由 Rust 完成清零。
 
 ## 运行起来！
 
@@ -106,10 +110,10 @@ Cargo 在宿主机上执行 `kernel/build.rs`。它把链接器脚本的完整�
 sh run.sh
 ```
 
-::: details 查看运行结果（首次构建节选）
+::: details 查看运行结果（构建和启动节选）
 ```text
    Compiling kernel v0.1.0 (…/ch04-boot/kernel)
-    Finished `release` profile [optimized] target(s) in 2.81s
+    Finished `release` profile [optimized] target(s) in 0.37s
 QEMU 11.1.2 monitor - type 'help' for more information
 (qemu)
 ```
@@ -119,7 +123,7 @@ QEMU 11.1.2 monitor - type 'help' for more information
 
 ## 你的第一次内核调试
 
-先在监视器里输入 `info registers`，再输入 `xp /2i $pc`。第二条命令从当前 PC 对应的物理地址反汇编两条指令。本章还没有启用分页。
+先在监视器里输入 `info registers`，再输入 `xp /3i $pc`。第二条命令从当前 PC 对应的物理地址反汇编三条指令。本章还没有启用分页。
 
 ::: details 查看运行结果（执行第一条指令之前）
 ```text
@@ -127,9 +131,10 @@ QEMU 11.1.2 monitor - type 'help' for more information
  PC=0000000040400048 X00=0000000000000000 X01=0000000000000000
 ...
 X29=0000000000000000 X30=0000000000000000  SP=0000000000000000
-(qemu) xp /2i $pc
-0x40400048:  58000140  ldr      x0, #0x40400070
+(qemu) xp /3i $pc
+0x40400048:  58000080  ldr      x0, #0x40400058
 0x4040004c:  9100001f  mov      sp, x0
+0x40400050:  14000004  b        #0x40400060
 ```
 :::
 
@@ -142,12 +147,12 @@ X29=0000000000000000 X30=0000000000000000  SP=0000000000000000
 (qemu) cont
 (qemu) stop
 (qemu) info registers
- PC=000000004040008c X00=0000000040400090 X01=0000000040400090
+ PC=0000000040400088 X00=0000000040420090 X01=0000000000000000
 ...
 X29=0000000000000000 X30=0000000000000000  SP=0000000040420090
 PSTATE=00000000600003c5 -ZC- EL1h    FPU disabled
 (qemu) xp /1i $pc
-0x4040008c:  17ffffff  b        #0x40400088
+0x40400088:  17ffffff  b        #0x40400084
 ```
 :::
 
@@ -160,11 +165,11 @@ grep -E ' (boot|kernel_main|__stack_top = \.)$' kernel.map
 ::: details 查看运行结果（链接器分配的地址）
 ```text
         40400048         40400048        0     1                 boot
-        40400088         40400088        8     1                 kernel_main
+        40400060         40400060       2c     1                 kernel_main
         40420090         40420090        0     1         __stack_top = .
 ```
 :::
 
-第一列是符号地址，第三列是大小（十六进制）。这次构建中，`kernel_main` 从 `0x40400088` 开始，共 8 字节。暂停时的 PC 是 `0x4040008c`，落在函数内部，当前指令正跳回循环开头。再看 SP，它与 `__stack_top` 的地址 `0x40420090` 一致。编译器版本变化可能改变具体地址，你可以用自己的 `kernel.map` 做这两项核对。
+第一列是符号地址，第三列是大小（十六进制）。这次构建中，`kernel_main` 从 `0x40400060` 开始，大小是 `0x2c`（44 字节）。暂停时的 PC 是 `0x40400088`，落在函数内部，当前指令正跳回循环开头。再看 SP，它与 `__stack_top` 的地址 `0x40420090` 一致。编译器版本变化可能改变具体地址，你可以用自己的 `kernel.map` 做这两项核对。
 
 现在你已经在 AArch64 上启动了第一个 Rust 内核。下一章我们会让它通过串口输出一行文字。
