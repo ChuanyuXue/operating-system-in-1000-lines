@@ -4,366 +4,167 @@ title: 引导
 
 # 引导加载内核
 
-当计算机开机时，CPU 会初始化自身并开始执行操作系统。操作系统初始化硬件并启动应用程序。这个过程称为“引导”（booting）。
+第 01 章里，`rustc` 生成了一个目标文件，QEMU 也能启动一颗虚拟 CPU。这一章把两件事连起来：把代码链接成一个可执行的内核，让 CPU 从我们指定的入口开始，设置栈指针，再跳进 Rust 函数。即使还没有串口输出，也可以用寄存器验证内核确实走完了这几步。
 
-在操作系统启动之前发生了什么？在 PC 中，BIOS（或现代 PC 中的 UEFI）初始化硬件，显示启动画面，并从磁盘加载操作系统。在 QEMU `virt` 机器中，OpenSBI 相当于 BIOS/UEFI 的角色。
+## 谁把控制权交给内核？
 
-## 监管者二进制接口（SBI）
+固件可以初始化机器、装入内核，还可以在内核启动后提供服务。原书使用的 RISC-V 固件 OpenSBI 就承担了这些工作。我们在 QEMU 的 Arm `virt` 板上可以从更短的一条路径开始：把一个裸机 ELF 可执行文件交给 `-kernel`。QEMU 根据 ELF 的程序头把各个可加载段放入客机内存，并用 ELF 头里的入口地址初始化 PC。
 
-监管者二进制接口（Supervisor Binary Interface，SBI）是一个面向操作系统内核的 API，它定义了固件（OpenSBI）向操作系统提供的功能。
+> **与原书对照**　原书先观察 OpenSBI 启动，再由 OpenSBI 把控制权交给内核。这里由 QEMU 直接加载 ELF。下面的地址和启动步骤针对这台虚拟机；真实 Arm 开发板的固件有自己的交接约定。[QEMU Arm virt 裸机启动说明](https://www.qemu.org/docs/master/system/arm/virt.html#hardware-configuration-information-for-bare-metal-programming)
 
-SBI 规范在 [GitHub 上发布](https://github.com/riscv-non-isa/riscv-sbi-doc/releases)。它定义了许多有用的功能，如在调试控制台（如串行端口）显示字符、重启/关机和定时器设置等。
+## 先看启动时的 CPU
 
-一个著名的 SBI 实现是 [OpenSBI](https://github.com/riscv-software-src/opensbi)。在 QEMU 中，默认启动 OpenSBI，执行特定硬件的初始化，然后引导内核。
+先沿用第 01 章的命令，观察还没有装入内核时的状态。`-S` 让 CPU 暂停，`-monitor stdio` 把当前终端接到 QEMU 监视器：
 
-## 启动 OpenSBI
-
-首先，让我们看看 OpenSBI 是如何启动的。创建一个名为 `run.sh` 的 shell 脚本：
-
-```
-$ touch run.sh
-$ chmod +x run.sh
+```sh
+qemu-system-aarch64 -machine virt -cpu cortex-a53 -S -display none -serial none -monitor stdio
 ```
 
-```bash [run.sh]
-#!/bin/bash
-set -xue
+输入 `info registers`，记下 PC 和 SP，再输入 `quit`。稍后用同一条监视器命令观察装入内核后的变化。
 
-# QEMU 文件路径
-QEMU=qemu-system-riscv32
-
-# 启动 QEMU
-$QEMU -machine virt -bios default -nographic -serial mon:stdio --no-reboot
-```
-
-QEMU 使用各种选项来启动虚拟机。以下是脚本中使用的选项：
-
-- `-machine virt`：启动一个 `virt` 机器。你可以用 `-machine '?'` 选项查看其他支持的机器。
-- `-bios default`：使用默认固件（在本例中是 OpenSBI）。
-- `-nographic`：启动 QEMU 时不使用 GUI 窗口。
-- `-serial mon:stdio`：将 QEMU 的标准输入/输出连接到虚拟机的串行端口。指定 `mon:` 允许通过按下 <kbd>Ctrl</kbd>+<kbd>A</kbd> 然后 <kbd>C</kbd> 切换到 QEMU 监视器。
-- `--no-reboot`：如果虚拟机崩溃，停止模拟器而不重启（对调试有用）。
-
-> [!TIP]
->
-> 在 macOS 中，你可以用以下命令查看 Homebrew 的 QEMU 路径：
->
-> ```
-> $ ls $(brew --prefix)/bin/qemu-system-riscv32
-> /opt/homebrew/bin/qemu-system-riscv32
-> ```
-
-运行脚本，你会看到以下横幅：
-
-```
-$ ./run.sh
-
-OpenSBI v1.2
-   ____                    _____ ____ _____
-  / __ \                  / ____|  _ \_   _|
- | |  | |_ __   ___ _ __ | (___ | |_) || |
- | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
- | |__| | |_) |  __/ | | |____) | |_) || |_
-  \____/| .__/ \___|_| |_|_____/|____/_____|
-        | |
-        |_|
-
-Platform Name             : riscv-virtio,qemu
-Platform Features         : medeleg
-Platform HART Count       : 1
-Platform IPI Device       : aclint-mswi
-Platform Timer Device     : aclint-mtimer @ 10000000Hz
+::: details 查看运行结果（寄存器节选）
+```text
+QEMU 11.1.2 monitor - type 'help' for more information
+(qemu) info registers
+CPU#0
+ PC=0000000000000000 X00=0000000000000000 X01=0000000000000000
 ...
+X29=0000000000000000 X30=0000000000000000  SP=0000000000000000
+PSTATE=00000000400003c5 -Z-- EL1h    FPU disabled
+(qemu) quit
 ```
-
-OpenSBI 显示了 OpenSBI 版本、平台名称、功能、HART（CPU 核心）数量等调试信息。
-
-当你按任何键时，什么都不会发生。这是因为 QEMU 的标准输入/输出已连接到虚拟机的串行端口，而你输入的字符被发送到了 OpenSBI。然而，没有人读取这些输入字符。
-
-按 <kbd>Ctrl</kbd>+<kbd>A</kbd> 然后 <kbd>C</kbd> 切换到 QEMU 调试控制台（QEMU 监视器）。你可以在监视器中用 `q` 命令退出 QEMU：
-
-```
-QEMU 8.0.2 monitor - type 'help' for more information
-(qemu) q
-```
-
-> [!TIP]
->
-> <kbd>Ctrl</kbd>+<kbd>A</kbd> 除了切换到 QEMU 监视器（<kbd>C</kbd> 键）外还有其他功能。例如，按 <kbd>X</kbd> 键将立即退出 QEMU。
->
-> ```
-> C-a h    打印此帮助
-> C-a x    退出模拟器
-> C-a s    将磁盘数据保存回文件（如果使用 -snapshot）
-> C-a t    切换控制台时间戳
-> C-a b    发送中断（magic sysrq）
-> C-a c    在控制台和监视器之间切换
-> C-a C-a  发送 C-a
-> ```
+:::
 
 ## 链接器脚本
 
-链接器脚本是定义可执行文件内存布局的文件。根据此布局，链接器为函数和变量分配内存地址。
+从这里开始，按第 03 章的布局建立一个独立的 Cargo 工程。可以在一个空目录里创建下文标注的文件，也可以从教程仓库根目录进入 `examples/ch04-boot/` 使用完整示例。后面的宿主机命令都在这个工程目录里运行。[本章完整源码](https://github.com/ChuanyuXue/operating-system-in-1000-lines/tree/main/examples/ch04-boot)
 
-让我们创建一个名为 `kernel.ld` 的新文件：
+先看 `kernel/kernel.ld`。它回答两个问题：指令和数据分别放在哪里？CPU 从哪个符号开始执行？
 
-```ld [kernel.ld]
-ENTRY(boot)
+<<< @/../examples/ch04-boot/kernel/kernel.ld{text}
 
-SECTIONS {
-    . = 0x80200000;
+`virt` 板的 RAM 从 `0x40000000` 开始。QEMU 在裸机启动时把描述硬件的设备树放在 RAM 起始处。本例选择从 `0x40400000` 布置内核，给起始区域留出 4 MiB。`ENTRY(boot)` 将符号 `boot` 的地址写入 ELF 的入口字段。等会儿可以在监视器里看到，内核映像的起点和第一条指令的地址可以不同。
 
-    .text :{
-        KEEP(*(.text.boot));
-        *(.text .text.*);
-    }
+| 区域 | 放什么 |
+| --- | --- |
+| `.text` | 可执行指令。`KEEP(*(.text.boot))` 保留我们的启动代码，并把它排在这个段的开头。 |
+| `.rodata`、`.data` | 只读常量，以及带初始值的可写数据。 |
+| `.bss` | 初值为零的静态数据。两个符号标出需要清零的地址区间。 |
+| `.stack` | 向下增长的内核栈。起点按 16 字节对齐，预留 128 KiB，高地址端标为 `__stack_top`。 |
 
-    .rodata : ALIGN(4) {
-        *(.rodata .rodata.*);
-    }
-
-    .data : ALIGN(4) {
-        *(.data .data.*);
-    }
-
-    .bss : ALIGN(4) {
-        __bss = .;
-        *(.bss .bss.* .sbss .sbss.*);
-        __bss_end = .;
-    }
-
-    . = ALIGN(4);
-    . += 128 * 1024; /* 128KB */
-    __stack_top = .;
-}
-```
-以下是链接器脚本的关键点：
-
-- 内核的入口点是 `boot` 函数。
-- 基地址是 `0x80200000`。
-- `.text.boot` 段总是放在开头。
-- 各段按 `.text`、`.rodata`、`.data` 和 `.bss` 的顺序放置。
-- 内核栈放在 `.bss` 段之后，大小为 128KB。
-
-这里提到的 `.text`、`.rodata`、`.data` 和 `.bss` 段是具有特定角色的数据区域：
-
-| 段名      | 描述                                              |
-| --------- | ------------------------------------------------- |
-| `.text`   | 此段包含程序的代码。                              |
-| `.rodata` | 此段包含只读的常量数据。                          |
-| `.data`   | 此段包含可读写的数据。                            |
-| `.bss`    | 此段包含初始值为零的可读写数据。                  |
-
-让我们仔细看看链接器脚本的语法。首先，`ENTRY(boot)` 声明 `boot` 函数是程序的入口点。然后，在 `SECTIONS` 块中定义每个段的放置位置。
-
-`*(.text .text.*)` 指令将所有文件（`*`）中的 `.text` 段和任何以 `.text.` 开头的段放在该位置。
-
-`.` 符号代表当前地址。它会随着数据的放置（如 `*(.text)`）自动增加。语句 `. += 128 * 1024` 表示"当前地址前进 128KB"。`ALIGN(4)` 指令确保当前地址调整到 4 字节边界。
-
-最后，`__bss = .` 将当前地址分配给符号 `__bss`。在 C 语言中，你可以使用 `extern char symbol_name` 引用已定义的符号。
-
-> [!TIP]
->
-> 链接器脚本提供了许多便利的功能，特别是对于内核开发。你可以在 GitHub 上找到真实的示例！
-
+脚本里的 `.` 表示链接器当前分配到的地址。`NOLOAD` 让栈和零初始化数据占用客机内存空间，无需在 ELF 文件里存放同样大小的一串零。
 
 ## 最小内核
 
-现在我们准备开始编写内核了。让我们从一个最小的内核开始！创建一个名为 `kernel.c` 的 C 语言源代码文件：
+将下面的代码放在 `kernel/src/main.rs`。先读 `boot` 和 `kernel_main`：前者是第一段汇编，后者是我们要到达的第一个 Rust 函数。
 
-```c [kernel.c]
-typedef unsigned char uint8_t;
-typedef unsigned int uint32_t;
-typedef uint32_t size_t;
-
-extern char __bss[], __bss_end[], __stack_top[];
-
-void *memset(void *buf, char c, size_t n) {
-    uint8_t *p = (uint8_t *) buf;
-    while (n--)
-        *p++ = c;
-    return buf;
-}
-
-void kernel_main(void) {
-    memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
-
-    for (;;);
-}
-
-__attribute__((section(".text.boot")))
-__attribute__((naked))
-void boot(void) {
-    __asm__ __volatile__(
-        "mv sp, %[stack_top]\n" // 设置栈指针
-        "j kernel_main\n"       // 跳转到内核主函数
-        :
-        : [stack_top] "r" (__stack_top) // 将栈顶地址作为 %[stack_top] 传递
-    );
-}
-```
-
-让我们一个一个地探讨关键点：
+<<< @/../examples/ch04-boot/kernel/src/main.rs
 
 ### 内核入口点
 
-内核的执行从 `boot` 函数开始，该函数在链接器脚本中指定为入口点。在此函数中，栈指针（`sp`）被设置为链接器脚本中定义的栈区域的结束地址。然后，它跳转到 `kernel_main` 函数。需要注意的是，栈是向零方向增长的，也就是说，使用时它会递减。因此，必须设置栈区域的结束地址（而不是起始地址）。
+`ldr x0, =__stack_top` 把栈顶地址放进 `x0`，`mov sp, x0` 设置栈指针。第 02 章里，函数在栈上保存返回地址时会先减小 `sp`，所以这里从栈的高地址端开始。准备工作做完后，`b kernel_main` 跳入 Rust。`kernel_main` 的返回类型是 `!`，因此启动代码无需保存返回地址。
 
-### `boot` 函数属性
+### 怎样定义启动代码
 
-`boot` 函数有两个特殊属性。`__attribute__((naked))` 属性告诉编译器不要在函数体前后生成不必要的代码，比如返回指令。这确保内联汇编代码就是确切的函数体。
+`#![no_std]` 让内核使用 `core`，`#![no_main]` 让我们自己安排入口。`global_asm!` 把汇编直接放进目标文件。`.section .text.boot, "ax"` 选中可装入内存、可执行的代码段，`.global boot` 将入口符号交给链接器。`#[unsafe(no_mangle)]` 保留 `kernel_main` 这个符号名，使汇编里的跳转能找到它。
 
-`boot` 函数还有 `__attribute__((section(".text.boot")))` 属性，它控制函数在链接器脚本中的放置。由于 OpenSBI 简单地跳转到 `0x80200000` 而不知道入口点，所以需要将 `boot` 函数放在 `0x80200000`。
+Rust 还要求裸机程序提供 `#[panic_handler]`。暂时没有输出设备，示例在 panic 时原地循环。正常路径进入 `kernel_main`，执行 `wfe`（等待事件），被唤醒后继续等待。
 
-### 使用 `extern char` 获取链接器脚本符号
+### 取链接器符号的地址
 
-在文件开始处，使用 `extern char` 声明了链接器脚本中定义的每个符号。在这里，我们只关心获取符号的地址，所以使用 `char` 类型并不那么重要。
+`__bss_start`、`__bss_end` 和 `__stack_top` 都是链接器给地址起的名字。`ldr x0, =__bss_start` 是汇编器提供的伪指令，它把符号的**地址**装进寄存器。第 02 章写过的 `ldr w0, [x1]` 则会访问 `x1` 指向的内存，读出那里的**内容**。
 
-我们也可以声明为 `extern char __bss;`，但单独的 `__bss` 表示 *“.bss 段第 0 字节的值”* 而不是 *“.bss 段的起始地址”*。因此，建议添加 `[]` 以确保 `__bss` 返回一个地址同时防止任何不小心的错误。
+### 初始化 .bss
 
-### `.bss` 段初始化
-
-在 `kernel_main` 函数中，首先使用 `memset` 函数将 `.bss` 段初始化为零。虽然某些引导加载程序可能会识别并清零 `.bss` 段，但我们以防万一手动初始化它。最后，函数进入一个无限循环，内核终止。
+清零循环处理半开区间 `[__bss_start, __bss_end)`。每轮先比较两个地址，到达末尾就跳到 `2:`。`strb wzr, [x0], #1` 写入一个零字节，再把地址加一。`1b` 表示往回找最近的 `1:`，`2f` 表示往前找下一个 `2:`。当前示例没有需要清零的静态变量，两端地址相等，第一次比较就会退出。
 
 ## 运行起来！
 
-将内核构建命令和新的 QEMU 选项（`-kernel kernel.elf`）添加到 `run.sh`：
+工作区根目录的 `Cargo.toml` 目前只包含内核。release 配置使用 `panic = "abort"`，无需为 panic 展开调用栈。
 
-```bash [run.sh] {6-12,16}
-#!/bin/bash
-set -xue
+<<< @/../examples/ch04-boot/Cargo.toml
 
-QEMU=qemu-system-riscv32
+在 `.cargo/config.toml` 中选用第 01 章安装的目标：
 
-# clang 路径和编译器标志
-CC=/opt/homebrew/opt/llvm/bin/clang  # Ubuntu 用户：使用 CC=clang
-CFLAGS="-std=c11 -O2 -g3 -Wall -Wextra --target=riscv32-unknown-elf -fuse-ld=lld -fno-stack-protector -ffreestanding -nostdlib"
+<<< @/../examples/ch04-boot/.cargo/config.toml
 
-# 构建内核
-$CC $CFLAGS -Wl,-Tkernel.ld -Wl,-Map=kernel.map -o kernel.elf \
-    kernel.c
+在 `kernel/Cargo.toml` 中给内核包命名：
 
-# 启动 QEMU
-$QEMU -machine virt -bios default -nographic -serial mon:stdio --no-reboot \
-    -kernel kernel.elf
+<<< @/../examples/ch04-boot/kernel/Cargo.toml
+
+Cargo 在宿主机上执行 `kernel/build.rs`。它把链接器脚本的完整路径传给内核的链接步骤，并生成 `kernel.map`，记录符号对应的地址。修改 `kernel.ld` 后，Cargo 会重新运行这一步。
+
+<<< @/../examples/ch04-boot/kernel/build.rs
+
+最后在工程根目录创建 `run.sh`。Cargo 生成的可执行文件叫 `kernel`，QEMU 可以直接识别它的 ELF 格式。
+
+<<< @/../examples/ch04-boot/run.sh{sh}
+
+从工程目录运行：
+
+```sh
+sh run.sh
 ```
 
-> [!TIP]
->
-> 在 macOS 上，你可以用以下命令查看 Homebrew 版本的 clang 的文件路径：
->
-> ```
-> $ ls $(brew --prefix)/opt/llvm/bin/clang
-> /opt/homebrew/opt/llvm/bin/clang
-> ```
+::: details 查看运行结果（首次构建节选）
+```text
+   Compiling kernel v0.1.0 (…/ch04-boot/kernel)
+    Finished `release` profile [optimized] target(s) in 2.81s
+QEMU 11.1.2 monitor - type 'help' for more information
+(qemu)
+```
+:::
 
-指定的 clang 选项（`CFLAGS` 变量）如下：
-
-| 选项 | 描述 |
-| ------ | ----------- |
-| `-std=c11` | 使用 C11。 |
-| `-O2` | 启用优化以生成高效的机器代码。 |
-| `-g3` | 生成最大量的调试信息。 |
-| `-Wall` | 启用主要警告。 |
-| `-Wextra` | 启用额外警告。 |
-| `--target=riscv32-unknown-elf` | 编译为 32 位 RISC-V。 |
-| `-ffreestanding` | 不使用主机环境（你的开发环境）的标准库。 |
-| `-fuse-ld=lld` | 使用 LLVM linker（`ld.lld`）。 |
-| `-fno-stack-protector` | 禁用栈保护功能（[#31](https://github.com/nuta/operating-system-in-1000-lines/issues/31#issuecomment-2613219393) 参考) |
-| `-nostdlib` | 不链接标准库。 |
-| `-Wl,-Tkernel.ld` | 指定链接器脚本。 |
-| `-Wl,-Map=kernel.map` | 输出映射文件（链接器分配结果）。 |
-
-`-Wl,` 表示将选项传递给链接器而不是 C 编译器。`clang` 命令执行 C 编译并在内部执行链接器。
+保留这个终端。现在 ELF 已经装进内存，`-S` 让 CPU 仍然停在第一条指令之前。
 
 ## 你的第一次内核调试
 
-当你运行 `run.sh` 时，内核进入无限循环。没有任何迹象表明内核正在正确运行。但别担心，这在底层开发中很常见！这就是 QEMU 调试功能发挥作用的地方。
+先在监视器里输入 `info registers`，再输入 `xp /2i $pc`。第二条命令从当前 PC 对应的物理地址反汇编两条指令。本章还没有启用分页。
 
-要获取更多关于 CPU 寄存器的信息，打开 QEMU 监视器并执行 `info registers` 命令：
-
-```
-QEMU 8.0.2 monitor - type 'help' for more information
+::: details 查看运行结果（执行第一条指令之前）
+```text
 (qemu) info registers
-
-CPU#0
- V      =   0
- pc       80200014  ← 将要执行的指令的地址（程序计数器）
- ...
- x0/zero  00000000 x1/ra    8000a084 x2/sp    80220018 x3/gp    00000000  ← 每个寄存器的值
- x4/tp    80033000 x5/t0    00000001 x6/t1    00000002 x7/t2    00000000
- x8/s0    80032f50 x9/s1    00000001 x10/a0   80220018 x11/a1   87e00000
- x12/a2   00000007 x13/a3   00000019 x14/a4   00000000 x15/a5   00000001
- x16/a6   00000001 x17/a7   00000005 x18/s2   80200000 x19/s3   00000000
- x20/s4   87e00000 x21/s5   00000000 x22/s6   80006800 x23/s7   8001c020
- x24/s8   00002000 x25/s9   8002b4e4 x26/s10  00000000 x27/s11  00000000
- x28/t3   616d6569 x29/t4   8001a5a1 x30/t5   000000b4 x31/t6   00000000
-```
-
-> [!TIP]
->
-> 具体值可能因 clang 和 QEMU 的版本而异。
-
-`pc 80200014` 显示当前程序计数器，即正在执行的指令的地址。让我们使用反汇编器（`llvm-objdump`）来确定具体的代码行：
-
-```
-$ llvm-objdump -d kernel.elf
-
-kernel.elf:     file format elf32-littleriscv
-
-Disassembly of section .text:
-
-80200000 <boot>:  ← boot 函数
-80200000: 37 05 22 80   lui     a0, 524832
-80200004: 13 05 85 01   addi    a0, a0, 24
-80200008: 2a 81         mv      sp, a0
-8020000a: 6f 00 60 00   j       0x80200010 <kernel_main>
-8020000e: 00 00         unimp
-
-80200010 <kernel_main>:  ← kernel_main 函数
-80200010: 73 00 50 10   wfi
-80200014: f5 bf         j       0x80200010 <kernel_main>  ← pc 在这里
-```
-
-每行对应一条指令。每列表示：
-
-- 指令的地址。
-- 机器码的十六进制转储。
-- 反汇编的指令。
-
-`pc 80200014` 表示当前执行的指令是 `j 0x80200010`。这确认了 QEMU 已经正确到达 `kernel_main` 函数。
-
-让我们也检查一下栈指针（sp 寄存器）是否设置为链接器脚本中定义的 `__stack_top` 值。寄存器转储显示 `x2/sp 80220018`。要查看链接器放置 `__stack_top` 的位置，检查 `kernel.map` 文件：
-
-```
-     VMA      LMA     Size Align Out     In      Symbol
-       0        0 80200000     1 . = 0x80200000
-80200000 80200000       16     4 .text
+ PC=0000000040400048 X00=0000000000000000 X01=0000000000000000
 ...
-80200016 80200016        2     1 . = ALIGN ( 4 )
-80200018 80200018    20000     1 . += 128 * 1024
-80220018 80220018        0     1 __stack_top = .
+X29=0000000000000000 X30=0000000000000000  SP=0000000000000000
+(qemu) xp /2i $pc
+0x40400048:  58000140  ldr      x0, #0x40400070
+0x4040004c:  9100001f  mov      sp, x0
+```
+:::
+
+这次 PC 已经指向 `boot`。反汇编里第一条 `ldr` 从附近的常量池取得栈顶地址。此时 `sp` 还是零，因为第二条指令还没有执行。
+
+输入 `cont` 让客机运行，稍等片刻再输入 `stop`。再次查看寄存器，并用 `xp /1i $pc` 看看这次停在哪里：
+
+::: details 查看运行结果（执行启动代码之后）
+```text
+(qemu) cont
+(qemu) stop
+(qemu) info registers
+ PC=000000004040008c X00=0000000040400090 X01=0000000040400090
+...
+X29=0000000000000000 X30=0000000000000000  SP=0000000040420090
+PSTATE=00000000600003c5 -ZC- EL1h    FPU disabled
+(qemu) xp /1i $pc
+0x4040008c:  17ffffff  b        #0x40400088
+```
+:::
+
+这些地址对应哪段源码？在监视器输入 `quit` 回到宿主机，查看同一次构建生成的链接映射：
+
+```sh
+grep -E ' (boot|kernel_main|__stack_top = \.)$' kernel.map
 ```
 
-或者，你也可以使用 `llvm-nm` 检查函数/变量的地址：
-
+::: details 查看运行结果（链接器分配的地址）
+```text
+        40400048         40400048        0     1                 boot
+        40400088         40400088        8     1                 kernel_main
+        40420090         40420090        0     1         __stack_top = .
 ```
-$ llvm-nm kernel.elf
-80200010 t .LBB0_1
-00000000 N .Lline_table_start0
-80220018 T __stack_top
-80200000 T boot
-80200010 T kernel_main
-```
+:::
 
-第一列是它们被放置的地址（VMA）。你可以看到 `__stack_top` 被放置在 `0x80220018`。这确认了栈指针在 `boot` 函数中被正确设置。漂亮！
+第一列是符号地址，第三列是大小（十六进制）。这次构建中，`kernel_main` 从 `0x40400088` 开始，共 8 字节。暂停时的 PC 是 `0x4040008c`，落在函数内部，当前指令正跳回循环开头。再看 SP，它与 `__stack_top` 的地址 `0x40420090` 一致。编译器版本变化可能改变具体地址，你可以用自己的 `kernel.map` 做这两项核对。
 
-随着程序的运行，`info registers` 的结果会发生变化。如果你想暂时停止模拟，可以在 QEMU 监视器中使用 `stop` 命令：
-
-```
-(qemu) stop             ← 进程停止
-(qemu) info registers   ← 你可以观察停止时的状态
-(qemu) cont             ← 进程继续
-```
-
-现在你已经成功编写了你的第一个内核！
+现在你已经在 AArch64 上启动了第一个 Rust 内核。下一章我们会让它通过串口输出一行文字。
