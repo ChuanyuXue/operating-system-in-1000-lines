@@ -1,152 +1,101 @@
 ---
-title: C 标准库
+title: Rust 核心库
 ---
 
-# C 标准库
+# Rust 核心库
 
-在本章中，让我们实现基本类型和内存操作，以及字符串操作函数。在本书中，出于学习目的，我们将从头开始创建这些功能，而不是使用 C 标准库。
+如果把 `hello.txt` 写进一个 12 字节的缓冲区，文件名占几个字节？剩下的位置该放什么？读回来时，又怎样判断它和另一个文件名是否相同？本章沿用第 05 章的内核和串口，用这个例子学习裸机 Rust 里的基本类型、内存操作和字符串操作。
 
-> [!TIP]
->
-> 本章介绍的概念在 C 编程中非常常见，因此 ChatGPT 会提供可靠的答案。如果你在实现或理解任何部分时遇到困难，随时可以尝试询问它或联系我。
+> **与原书对照**　原书在 `common.h` 和 `common.c` 中定义类型，并实现 `memcpy`、`memset`、`strcpy` 和 `strcmp`。我们的内核使用 `#![no_std]`，仍然可以使用 Rust 内置的整数类型，以及 `core` 为切片和字符串提供的方法。上一章用过的 `core::fmt` 也来自这个库。[Rust 核心库文档](https://doc.rust-lang.org/core/)
 
 ## 基本类型
 
-首先，让我们在 `common.h` 中定义一些基本类型和便捷宏：
+| 原书中的类型 | Rust 中的写法 | 在内核里的用途 |
+| --- | --- | --- |
+| `bool` | `bool` | 表示真或假，例如发送队列是否已满。 |
+| `uint8_t`、`uint32_t`、`uint64_t` | `u8`、`u32`、`u64` | 明确指定宽度。一个串口字符用 `u8`，上一章的 PL011 寄存器按 `u32` 访问。 |
+| `size_t`、`uintptr_t` | `usize` | 保存切片长度、下标或指针地址。本书的 AArch64 目标上，`usize` 是 64 位。 |
 
+原书还为物理地址和虚拟地址分别命名为 `paddr_t`、`vaddr_t`。地址的**数值**可以放进 `usize`，地址的**含义**由使用位置决定。第 05 章串口基址 `0x0900_0000` 就是物理地址。等到分页一章，我们还要处理由页表翻译的虚拟地址。
 
-```c [common.h] {1-15,21-24}
-typedef int bool;
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-typedef uint32_t size_t;
-typedef uint32_t paddr_t;
-typedef uint32_t vaddr_t;
+先试一个页对齐的例子。把下面的代码放在 `kernel_main` 中，接在上一章的两个 `writeln!` 之后、等待循环之前。后面两节的代码也依次加在这里。
 
-#define true  1
-#define false 0
-#define NULL  ((void *) 0)
-#define align_up(value, align)   __builtin_align_up(value, align)
-#define is_aligned(value, align) __builtin_is_aligned(value, align)
-#define offsetof(type, member)   __builtin_offsetof(type, member)
-#define va_list  __builtin_va_list
-#define va_start __builtin_va_start
-#define va_end   __builtin_va_end
-#define va_arg   __builtin_va_arg
-
-void *memset(void *buf, char c, size_t n);
-void *memcpy(void *dst, const void *src, size_t n);
-char *strcpy(char *dst, const char *src);
-int strcmp(const char *s1, const char *s2);
-void printf(const char *fmt, ...);
+```rust
+let page_size: usize = 0x1000;
+let start: usize = 0x1234;
+let page = start.checked_next_multiple_of(page_size).unwrap();
+writeln!(console, "usize: {} bits", usize::BITS).unwrap();
+writeln!(
+    console,
+    "{start:#x} -> {page:#x}, aligned: {}",
+    page.is_multiple_of(page_size)
+)
+.unwrap();
 ```
 
-这些大多数在标准库中都有，但我们添加了一些有用的类型：
-
-- `paddr_t`：表示物理内存地址的类型。
-- `vaddr_t`：表示虚拟内存地址的类型。相当于标准库中的 `uintptr_t`。
-- `align_up`：将 `value` 向上舍入到 `align` 的最近倍数。`align` 必须是 2 的幂。
-- `is_aligned`：检查 `value` 是否是 `align` 的倍数。`align` 必须是 2 的幂。
-- `offsetof`：返回结构体中成员的偏移量（距离结构体开始的字节数）。
-
-`align_up` 和 `is_aligned` 在处理内存对齐时很有用。例如，`align_up(0x1234, 0x1000)` 返回 `0x2000`。同样，`is_aligned(0x2000, 0x1000)` 返回 true，但 `is_aligned(0x2f00, 0x1000)` 是 false。
-
-每个宏中使用的以 `__builtin_` 开头的函数是 Clang 特定的扩展（内置函数）。参见 [Clang 内置函数和宏](https://clang.llvm.org/docs/LanguageExtensions.html)。
-
-> [!TIP]
->
-> 这些宏也可以在不使用内置函数的情况下用 C 语言实现。`offsetof` 的纯 C 实现特别有趣 ;)
+一页是 `0x1000` 字节。地址 `0x1234` 落在页内，从这里向上取最近的页边界会得到 `0x2000`。如果起点已经对齐，结果就是起点本身。`checked_next_multiple_of` 在结果溢出或除数为零时返回 `None`，本例中的两个常量可以确定结果存在。检查对齐用 `is_multiple_of`。原书另一个常用宏 `offsetof` 在 Rust 中对应 `core::mem::offset_of!(类型, 字段)`，结果是字段距结构体起点的字节数。[usize 文档](https://doc.rust-lang.org/core/primitive.usize.html#method.checked_next_multiple_of) · [offset_of! 文档](https://doc.rust-lang.org/core/mem/macro.offset_of.html)
 
 ## 内存操作
 
-接下来，我们实现以下内存操作函数。
+准备一个 12 字节的字段来存放文件名。约定很简单：文件名能放下就复制进去，剩余位置填零，并返回实际复制的字节数。如果放不下，整个字段保持原样。
 
-`memcpy` 函数将 `n` 字节从 `src` 复制到 `dst`：
+创建 `kernel/src/name.rs`：
 
-```c [common.c]
-void *memcpy(void *dst, const void *src, size_t n) {
-    uint8_t *d = (uint8_t *) dst;
-    const uint8_t *s = (const uint8_t *) src;
-    while (n--)
-        *d++ = *s++;
-    return dst;
-}
+<<< @/../examples/ch06-core/kernel/src/name.rs
+
+`&mut [u8]` 是可写的字节切片，带有长度。`split_at_mut_checked` 先检查容量，再把字段分成两段。第一段和源文件名的字节数相同，可以用 `copy_from_slice` 复制，这一步对应原书的 `memcpy`。第二段用 `fill(0)` 填零，对应 `memset`。文件名过长时，第一行的 `?` 直接返回 `None`，两次写操作都还没开始。[切片方法文档](https://doc.rust-lang.org/core/primitive.slice.html#method.split_at_mut_checked)
+
+在 `kernel/src/main.rs` 的 `mod console;` 旁添加 `mod name;`，再把这三行接在刚才的对齐示例后：
+
+```rust
+let mut field = [0xa5; 12];
+let len = name::copy_name(&mut field, "hello.txt").unwrap();
+writeln!(console, "name field: {field:02x?}").unwrap();
 ```
 
-`memset` 函数用 `c` 填充 `buf` 的前 `n` 个字节。这个函数已经在第 4 章中实现用于初始化 bss 段。让我们将它从 `kernel.c` 移到 `common.c`：
-
-```c [common.c]
-void *memset(void *buf, char c, size_t n) {
-    uint8_t *p = (uint8_t *) buf;
-    while (n--)
-        *p++ = c;
-    return buf;
-}
-```
-
-> [!TIP]
->
-> `*p++ = c;` 在一个语句中完成指针解引用和指针操作。为了清晰起见，它相当于：
->
-> ```c
-> *p = c;    // 解引用指针
-> p = p + 1; // 赋值后移动指针
-> ```
->
-> 这是 C 语言中的一个惯用语。
+初始值特意选了 `0xa5`，这样在串口输出里能看清哪些位置被改写了。`hello.txt` 占 9 字节，因此前 9 字节会变为文件名，最后 3 字节会变为零。如果文件名恰好占满 12 字节，填充部分就是空切片。这种写法适用于已经取得可写切片的普通内存。第 04 章的启动代码则要在使用静态变量之前，按链接器给出的地址清零整个 `.bss`。
 
 ## 字符串操作
 
-让我们从 `strcpy` 开始。这个函数将字符串从 `src` 复制到 `dst`：
+原书的 `strcpy` 会复制到第一个 `'\0'` 为止，并把这个结束符一起写入目标。Rust 的 `&str` 携带 UTF-8 字节长度。刚才保存的 `len` 就是有效文本的长度，因此即使字段恰好写满，也能读回完整文件名。
 
-```c [common.c]
-char *strcpy(char *dst, const char *src) {
-    char *d = dst;
-    while (*src)
-        *d++ = *src++;
-    *d = '\0';
-    return dst;
-}
+```rust
+let stored = core::str::from_utf8(&field[..len]).unwrap();
+writeln!(console, "{stored} == hello.txt: {}", stored == "hello.txt").unwrap();
+writeln!(
+    console,
+    "{stored} cmp meow.txt: {:?}",
+    stored.cmp("meow.txt")
+)
+.unwrap();
 ```
 
-> [!WARNING]
->
-> `strcpy` 函数即使在 `src` 比 `dst` 的内存区域长时也会继续复制。这很容易导致 bug 和漏洞，所以通常建议使用替代函数而不是 `strcpy`。永远不要在生产环境中使用它！
->
-> 为了简单起见，我们将在本书中使用 `strcpy`，但如果你有能力，请尝试实现并使用替代函数（`strcpy_s`）。
+`from_utf8` 检查这段字节是否是有效的 UTF-8。本例中的字节刚从一个 `&str` 完整复制过来，所以可以 `unwrap()`。比较两个名字是否相等直接用 `==`。如果还关心顺序，`cmp` 会返回 `Less`、`Equal` 或 `Greater`，对应 C 的 `strcmp` 返回负数、零或正数。这里第一个不同的字节是 `h` 和 `m`，因此结果是 `Less`。[Rust 字符串文档](https://doc.rust-lang.org/core/primitive.str.html)
 
-下一个函数是 `strcmp` 函数。它比较 `s1` 和 `s2` 并返回：
+现在从工程目录启动 QEMU。想直接运行完整示例，可以进入教程仓库的 `examples/ch06-core/`。[本章完整源码](https://github.com/ChuanyuXue/operating-system-in-1000-lines/tree/main/examples/ch06-core)
 
-| 条件 | 结果 |
-| --------- | ------ |
-| `s1` == `s2` | 0 |
-| `s1` > `s2` | 正值 |
-| `s1` < `s2` | 负值 |
-
-```c [common.c]
-int strcmp(const char *s1, const char *s2) {
-    while (*s1 && *s2) {
-        if (*s1 != *s2)
-            break;
-        s1++;
-        s2++;
-    }
-
-    return *(unsigned char *)s1 - *(unsigned char *)s2;
-}
+```sh
+sh run.sh
 ```
 
-> [!TIP]
->
-> 在比较时转换为 `unsigned char *` 是为了符合 [POSIX 规范](https://www.man7.org/linux/man-pages/man3/strcmp.3.html#:~:text=both%20interpreted%20as%20type%20unsigned%20char)。
-
-`strcmp` 函数经常用于检查两个字符串是否相同。这有点反直觉，但当 `!strcmp(s1, s2)` 为真时（即当函数返回零时），字符串是相同的：
-
-```c
-if (!strcmp(s1, s2))
-    printf("s1 == s2\n");
-else
-    printf("s1 != s2\n");
+::: details 查看运行结果（客机串口）
+```text
+Hello World!
+1 + 2 = 3, 1234abcd
+usize: 64 bits
+0x1234 -> 0x2000, aligned: true
+name field: [68, 65, 6c, 6c, 6f, 2e, 74, 78, 74, 00, 00, 00]
+hello.txt == hello.txt: true
+hello.txt cmp meow.txt: Less
 ```
+:::
+
+可以把文件名改成 `"你好.txt"` 再运行一次。两个汉字各占 3 个 UTF-8 字节，加上 `.txt`，总共 10 字节。观察字段末尾还剩几个零，以及和 `"hello.txt"` 比较的结果。
+
+::: details 查看运行结果（仅将传给 copy_name 的文件名改为“你好.txt”，串口节选）
+```text
+name field: [e4, bd, a0, e5, a5, bd, 2e, 74, 78, 74, 00, 00]
+你好.txt == hello.txt: false
+你好.txt cmp meow.txt: Greater
+```
+:::
