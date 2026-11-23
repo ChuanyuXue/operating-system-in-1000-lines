@@ -1,248 +1,190 @@
 ---
-title: RISC-V 101
+title: AArch64 101
 ---
 
-# RISC-V
+# AArch64 101
 
-就像网页浏览器隐藏了 Windows/macOS/Linux 的差异，操作系统则是隐藏了不同 CPU 之间的差异。换句话说，操作系统是一个操控 CPU 并为应用程序提供抽象层的程序。
+我是一名系统软件工程师，日常工作中经常使用 AArch64。这就是我选择用 AArch64 来移植这本书的原因。
 
-本书选择 RISC-V 作为目标 CPU 是因为：
-
-- [规范](https://riscv.org/technical/specifications/)简单且适合新手。
-- 它是近年来流行的 ISA（指令集架构），与 x86 和 Arm 并驾齐驱。
-- 设计决策在整个规范中都有详细记录，并且读起来很有趣。
-
-我们将会基于 **32 位**的 RISC-V 来编写操作系统。当然稍作改动你也可以让它适配 64 位的 RISC-V。但是，更宽的位宽会变得稍微复杂一些，而且更长的地址读起来可能很繁琐。
+AArch64 是 Arm 架构的 64 位执行状态。在这个状态下，处理器执行 A64 指令。本章沿用上一章的 Cortex-A53，看看 Rust 函数到了这颗 CPU 上是怎样执行的。
 
 ## QEMU 虚拟机
 
 计算机是由不同的设备组成的：CPU、内存、网卡、硬盘等等。例如，虽然 iPhone 和树莓派都使用 Arm CPUs，但显而易见它们是不一样的计算机。
 
-本书支持 QEMU `virt` 虚拟机（[文档](https://www.qemu.org/docs/master/system/riscv/virt.html)）是因为：
+本书支持 QEMU `virt` 虚拟机（[文档](https://www.qemu.org/docs/master/system/arm/virt.html)）是因为：
 
 - 哪怕它不是真实存在于这个世界的，它也是简单的并且跟真实设备非常相似。
 - 你可以免费使用 QEMU 来模拟而不需要购买物理硬件。
 - 当你遇到调试问题，你可以阅读 QEMU 的代码、或者用调试器附加到 QEMU 进程来研究哪里出错了。
 
-## RISC-V assembly 101
+## AArch64 汇编入门
 
-RISC-V，或者说是 RISC-V ISA（指令集架构），定义了一些列 CPU 可以执行的指令。有点类似于 API 或者编程语言规范。当你写 C 程序时，编译器会将代码翻译成 RISC-V 汇编代码。不幸的是，在编写操作系统过程中你需要写一些汇编代码，不过不用担心！汇编没有你想象中那么难。
+上一章用 `file` 看到了目标文件的格式。这次让 Rust 编译器输出汇编，就可以读到它为函数选择的指令。把上一章的 `probe.rs` 改成下面这样。`extern "C"` 让函数采用目标平台的 C 调用约定，`#[unsafe(no_mangle)]` 以原名导出函数，这样在汇编中也能直接找到 `add_one`。使用这个属性时，要确保程序里只有一个同名的导出符号。
 
-> [!TIP]
->
-> **试试 Compiler Explorer！**
->
-> [Compiler Explorer](https://godbolt.org/)是一个在线编译器，是帮助你学汇编的实用工具。当你写下 C 代码，它就会显示相应的汇编代码。
->
-> Compiler Explorer 默认使用 x86-64 CPU 汇编。可以通过在右边面板中指定 `RISC-V rv32gc clang (trunk)` 来输出 32 位 RISC-V 汇编。
->
-> 这里还有个有趣的事，你可以试试在编译选项中指定优化选项，例如 `-O0`（关闭优化）或者 `-O2` (二级优化)，然后看看汇编有什么变化。
+```rust [probe.rs]
+#![no_std]
+
+#[unsafe(no_mangle)]
+pub extern "C" fn add_one(value: u32) -> u32 {
+    value.wrapping_add(1)
+}
+```
+
+打开优化，用 `--emit=asm` 将汇编写入文件，再从函数名读到返回指令：
+
+```sh
+rustc +stable --target aarch64-unknown-none-softfloat --crate-type lib -O --emit=asm probe.rs -o probe.s
+sed -n '/^add_one:/,/^[[:space:]]*ret/p' probe.s
+```
+
+::: details 查看运行结果
+```asm
+add_one:
+    .cfi_startproc
+    add w0, w0, #1
+    ret
+```
+:::
 
 ### 汇编语言基础
 
-汇编语言（几乎）是机器代码的直接表示。我们来看一个简单的例子：
+`add_one:` 是标记函数地址的标签。`.cfi_startproc` 是给汇编器的指示。CPU 在这里执行的第一条指令是：
 
 ```asm
-addi a0, a1, 123
+add w0, w0, #1
 ```
 
-通常来说，每一行汇编代码表示一个单一指令。第一列（`addi`）是指令名，也被叫做 *操作码（opcode）*。接下来的几列（`a0, a1, 123`）被称作 *操作数（oprands）*，是指令的参数。在这个例子中，`addi` 指令将值 `123` 与寄存器 `a1` 中的值相加，然后将结果保存到寄存器 `a0`。
+从左往右读：`add` 做加法，第一个 `w0` 是结果写入的位置，第二个 `w0` 是原来的值，`#1` 是直接写在指令里的常数（立即数）。如果进入函数时 `w0` 是 41，执行后它就是 42。
 
 ### 寄存器
 
-寄存器类就像 CPU 中的临时变量，它们比内存快很多。CPU 将内存中的数据读取到寄存器，对寄存器做算术运算，然后将结果回写到内存或者寄存器。
+上一章在 QEMU 监视器里看到的 `X00`，在汇编中写作 `x0`。`x0` 有 64 位，`w0` 是同一个寄存器的低 32 位。写入 `w0` 时，`x0` 的高 32 位会清零。`add_one` 接收一个 `u32`，编译器用 `w0` 就能完成这次加法。
 
-下面是 RISC-V 中一些常见的寄存器：
-
-| 寄存器 | ABI 名称 （别名） | 解释 |
-|---| -------- | ----------- |
-| `pc` | `pc`       | 程序计数器（下一条指令的位置） |
-| `x0` |`zero`     | 硬连线零（始终读为零） |
-| `x1` |`ra`         | 返回地址 |
-| `x2` |`sp`         | 栈指针 |
-| `x5` - `x7` | `t0` - `t2` | 临时寄存器 |
-| `x8` | `fp/s0`      | 栈帧指针 |
-| `x9` | `s1`      | 调用期间保存的临时寄存器 |
-| `x10` - `x11` | `a0` - `a1`  | 函数参数/返回值 |
-| `x12` - `x17` | `a2` - `a7`  | 函数参数 |
-| `x18` - `x27` | `s2` - `s11` | 调用期间保存的临时寄存器 |
-| `x28` - `x31` | `t3` - `t6` | 临时寄存器 |
-
-> [!TIP]
->
-> **调用约定**
->
-> 通常来说，你可以按照你的喜好来使用寄存器，但为了和其他软件互通，寄存器的使用方式有明确的定义 —— 这被称为 *调用约定*。
->
-> 例如，`x10` - `x11` 寄存器被用作函数参数和返回值。为了可读性，它们在 ABI 中被赋予了像 `a0` - `a1` 这样的别名。在[规范](https://riscv.org/wp-content/uploads/2015/01/riscv-calling.pdf)可以看到更多细节。
+| 名称 | 本章中的用途 |
+| --- | --- |
+| `x0` 到 `x7` | 按调用约定传递前几个整数或指针参数。一个整数结果通常通过 `w0` 或 `x0` 返回。 |
+| `x30`（`lr`） | 链接寄存器，保存函数调用的返回地址。 |
+| `sp` | 栈指针，指向当前栈顶。 |
+| `pc` | 程序计数器。在 QEMU 暂停时可以查看下一条要执行的指令位于哪里。 |
 
 ### 内存访问
 
-寄存器真的很快，但它们的数量有限。绝大部分的数据都被保存在内存中，程序从内存中读取数据或者往内存中写入数据是通过 `lw` (load word) 指令和 `sw` (store word) 指令来实现的：
+假设 `x1` 里装着一个可以读写的、按 4 字节对齐的 `u32` 的地址。下面三条指令会把内存里的值加一：
 
 ```asm
-lw a0, (a1)  // 从 a1 寄存器中保存的地址中读取一个字（word，32 位）
-             // 然后保存到 a0 寄存器。在 C 语言就是： a0 = *a1;
+ldr w0, [x1]    // 从 x1 指向的地址读取 4 字节
+add w0, w0, #1
+str w0, [x1]    // 向同一个地址写回 4 字节
 ```
 
-```asm
-sw a0, (a1)  // 向 a1 保存的地址中写入一个字，这个字是保存在 a0 的。
-             // 在 C 语言中是： *a1 = a0;
-```
-
-你可以将 `(...)` 看作是 C 语言中的指针解引用。在这个例子里，`a1` 是一个指向 32 位宽值的指针。
+方括号表示按地址访问内存。地址用 64 位的 `x1` 保存，这次读写的宽度由 `w0` 决定。执行完 `add` 时只有寄存器的值变了，直到 `str` 执行后，内存里的值才会更新。
 
 ## 分支指令
 
-分支指令将会改变程序的控制流。它们被用于实现 `if`、`for` 和 `while` 语句，
-
+标签也可以标记循环的开头。`b 标签` 会无条件跳到那个位置，`cbnz`（compare and branch on nonzero）则先检查一个寄存器：
 
 ```asm
-    bnez    a0, <label>   // 如果 a0 不为 0 则跳转到 <label>
-    // 如果 a0 为 0 则从这里继续
-
-<label>:
-    // 如果 a0 不为 0 则从这里继续
+    mov w0, #3
+count_down:
+    sub w0, w0, #1
+    cbnz w0, count_down
 ```
 
-`bnez` 表示 "branch if not equal to zero"（分支如果不等于 0）。其他常见的分支指令有 `beq` (branch if equal，分支如果等于)和 `blt`（分支如果小于）。它们跟 C 语言的 `goto` 很像，只是带有条件。
+第一次执行 `cbnz` 时，`w0` 等于 2，于是 CPU 回到 `count_down`。第三次检查时，`w0` 已经减到 0，CPU 继续执行分支下面的指令。
 
 ### 函数调用
 
-`jal` (jump and link，跳转和链接)和 `ret` (return，返回)指令被用作调用函数和返回：
+在调用方，给 `add_one` 传入 41 只需准备一个参数：
 
 ```asm
-    li  a0, 123      // 加载 123 到 a0 寄存器（函数参数）
-    jal ra, <label>  // 跳转到 <label> 并且将返回地址保存到
-                     // ra 寄存器中。
-
-    // 函数调用结束后将会从这里继续...
-
-// int func(int a) {
-//   a += 1;
-//   return a;
-// }
-<label>:
-    addi a0, a0, 1    // 给 a0 （第一个参数） 加 1
-
-    ret               // 返回到 ra 保存的地址。
-                      // 返回值在 a0 寄存器。
+mov w0, #41
+bl  add_one
+mov w1, w0
 ```
 
-按照调用约定，函数参数会通过 `a0` - `a7` 寄存器传递，返回值则是保存在 `a0` 寄存器。
+`bl`（branch with link）把下一条指令的地址写入 `x30`，再跳到 `add_one`。回看前面编译出的两条指令：`add` 将 42 写入 `w0`，`ret` 默认跳回 `x30` 中的地址。于是调用方接着执行 `mov w1, w0`，此时 `w1` 也等于 42。
+
+> **与原书对照**　原书的 RISC-V 示例用 `a0` 传入整数并取回结果，用 `ra` 保存返回地址。在这个 AArch64 示例中，对应的是 `w0` 和 `x30`。寄存器的分工称为调用约定。[Arm 过程调用标准](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst)
 
 ### 栈
 
-栈是一个被用于函数调用和局部变量的后进先出（LIFO）的内存空间。它是向下发展的，栈指针 `sp` 指向栈顶。
-
-为了保存一个值到栈中，需要减小栈指针然后保存值（也被称作 *push* 操作）：
+如果一个函数本身还要调用另一个函数，第二次 `bl` 就会覆盖 `x30`。调用前可以先把自己的返回地址保存在栈里，等调用结束再取回来：
 
 ```asm
-    addi sp, sp, -4  // 将栈指针向下移动 4 字节
-                     // （即栈分配）
-
-    sw   a0, (sp)    // 将 a0 保存到栈
+call_add_one:
+    sub sp, sp, #16
+    str x30, [sp]
+    bl  add_one
+    ldr x30, [sp]
+    add sp, sp, #16
+    ret
 ```
 
-而从栈读取一个值，则是读取值然后增加栈指针（也被称作 *pop* 操作）：
-
-```asm
-    lw   a0, (sp)    // 从栈中读取到 a0
-    addi sp, sp, 4   // 将栈指针向上移动 4 字节
-                     // （即栈释放）
-```
-
-> [!TIP]
->
-> 在 C 语言里，栈操作是由编译器生成的，所以你不需要自己手写。
+栈向低地址增长，减小 `sp` 就为当前函数腾出了空间。`x30` 只占 8 字节，这里分配 16 字节可以保持栈指针的 16 字节对齐。最后的 `ret` 使用恢复后的地址，回到 `call_add_one` 的调用方。这段代码也解释了为什么引导时要先设置 `sp`：编译器随时可能生成像 `str x30, [sp]` 这样的栈访问。
 
 ## CPU 模式
 
-CPU 有多种模式，每个有不同的特权。在 RISC-V 中有三种模式：
+AArch64 用异常级别（Exception Level，简称 EL）表示当前代码拥有的权限。我们后面会分别在内核和用户程序里执行代码：
 
-| 模式   | 概述                                |
-| ------ | ----------------------------------- |
-| M-mode | OpenSBI（即 BIOS）运行的模式。     |
-| S-mode | 内核运行的模式，又称“内核模式”。     |
-| U-mode | 应用运行的模式，又称“用户模式”。     |
+| 级别 | 常见用途 |
+| --- | --- |
+| EL0 | 用户程序 |
+| EL1 | 操作系统内核 |
+| EL2 | 虚拟机监控器 |
+| EL3 | 安全监控固件 |
+
+打开上一章的 QEMU 监视器运行结果，找到 `PSTATE` 一行。这次运行显示 `EL1h`，表示 CPU 暂停时处于 EL1，使用该级别的栈指针。
 
 ## 特权指令
 
-在 CPU 指令中，有一些被称为特权指令的是应用程序（用户模式）不能执行的，在本书中，我们将使用下列权限指令：
+内核还可以通过系统寄存器查看或改变处理器状态。例如，`CurrentEL` 的第 3、2 位保存当前异常级别。下面几种操作会在内核代码中出现，具体访问权限取决于指令和所访问的寄存器：
 
-| 操作码和操作数             | 概述                                                                        | 伪代码                            |
-| ------------------------ | -------------------------------------------------------------------------- | -------------------------------- |
-| `csrr rd, csr`           | 读取 CSR                                                                    | `rd = csr;`                      |
-| `csrw csr, rs`           | 写入 CSR                                                                    | `csr = rs;`                      |
-| `csrrw rd, csr, rs`      | 同时读取和写入 CSR                                                            | `tmp = csr; csr = rs; rd = tmp;` |
-| `sret`                   | 从 trap 处理程序返回（恢复程序计数器、操作模式等）                                 |                                  |
-| `sfence.vma`             | 清除 TLB(Translation Lookaside Buffer)                                      |                                  |
-
-**CSR (Control and Status Register, 控制和状态寄存器)** 是一个保存 CPU 设置的寄存器。CSR 列表可以在[RISC-V Privileged Specification](https://riscv.org/specifications/privileged-isa/)找到。
-
-> [!TIP]
->
-> 一些指令（例如 `sret`）会执行一些比较复杂的操作。阅读 RISC-V 模拟器代码或许能更好地理解到底发生了什么。特别是 [rvemu](https://github.com/d0iasm/rvemu)，以一个直观且易于理解的方式编写的（例如 [sret 的实现](https://github.com/d0iasm/rvemu/blob/f55eb5b376f22a73c0cf2630848c03f8d5c93922/src/cpu.rs#L3357-L3400)）。
+| 指令示例 | 作用 |
+| --- | --- |
+| `mrs x0, CurrentEL` | 把当前异常级别的编码读入通用寄存器。 |
+| `msr VBAR_EL1, x0` | 设置 EL1 异常向量表的基址。 |
+| `eret` | 从异常返回，恢复相应的程序状态和执行地址。 |
 
 ## 内联汇编
 
-在接下来的章节中，你会接触到如下特殊的 C 语言语法：
-
-```c
-uint32_t value;
-__asm__ __volatile__("csrr %0, sepc" : "=r"(value));
-```
-
-这就是*“内联汇编”*，一种在 C 语言中嵌入汇编的语法。虽然你可以在一个单独的文件（`.S` 扩展名）中写汇编，但是更建议首选内联汇编，因为：
-
-- 你可以在汇编中使用 C 变量。同样的，你也可以将汇编结果分配给 C 变量。
-- 你可以将寄存器分配工作交给 C 编译器。这么做你就不需要手写汇编代码来处理寄存器的保存和恢复。
+在 Rust 函数里，可以用 `core::arch::asm!` 写一小段需要直接交给 CPU 的指令。例如，内核想取得当前异常级别时，可以让汇编读取系统寄存器，再用普通的 Rust 表达式取出对应的位。
 
 ### 如何编写内联汇编代码
 
-内联汇编代码的编码格式如下：
-
-```c
-__asm__ __volatile__("assembly" : output operands : input operands : clobbered registers);
-```
-
-| 部分               | 释义                                                                         |
-| ------------------ | --------------------------------------------------------------------------- |
-| `__asm__`          | 表示这是内联汇编                                                               |
-| `__volatile__`     | 告诉编译器不要优化 `"assembly"` 这部分代码。                                     |
-| `"assembly"`       | 以字符串字面量编写的汇编代码                                                     |
-| output operands  | 用来保存汇编结果的 C 变量                                                         |
-| input operands   | 在汇编中使用的 C 表达式（例如 `123`、`x`）。                                        |
-| clobbered registers | 在汇编中会被破坏内容的寄存器。如果忘写，C 编译器将不会保留这些寄存器的内容，然后可能会引发 bug。 |
-
-输出和输入操作数是用冒号隔开的，每个操作数都是按 `约束 (C 表达式)` 格式写的。约束被用来指定操作数类型，通常用 `=r` (寄存器) 表示输出操作数，`r` 表示输入操作数。
-
-在汇编中可以用 `%0`、`%1`、`%2` 等等（第一个是输出）来访问输出和输入操作数。
+`asm!` 的第一个参数是指令模板。模板里的 `{raw}` 是占位符，后面的 `raw = out(reg) value` 要求编译器选一个通用寄存器，把指令写入该寄存器的结果交给 Rust 变量 `value`。相反，`in(reg)` 可以把 Rust 的值作为指令输入。[Rust 内联汇编参考](https://doc.rust-lang.org/reference/inline-assembly.html)
 
 ### 示例
 
-```c
-uint32_t value;
-__asm__ __volatile__("csrr %0, sepc" : "=r"(value));
+把这个函数追加到 `probe.rs`：
+
+```rust
+#[unsafe(no_mangle)]
+pub extern "C" fn current_el() -> u64 {
+    let value: u64;
+    // 内核运行在 EL1，可以读取 CurrentEL。
+    unsafe { core::arch::asm!("mrs {raw}, CurrentEL", raw = out(reg) value) }
+    (value >> 2) & 0b11
+}
 ```
 
-使用 `csrr` 指令来读取 `sepc` CSR 的值，然后将它分配给 `value` 变量。`%0` 对应到 `value` 变量。
+用同一个裸机目标再次编译，查看 `current_el` 的函数体：
 
-```c
-__asm__ __volatile__("csrw sscratch, %0" : /* 输出操作数为空 */ : "r"(123));
+```sh
+rustc +stable --target aarch64-unknown-none-softfloat --crate-type lib -O --emit=asm probe.rs -o probe.s
+sed -n '/^current_el:/,/^[[:space:]]*ret/p' probe.s
 ```
 
-使用 `csrw` 指令将 `123` 写入到 `sscratch` CSR。`%0` 对应到包含 `123` （`r` 约束） 的寄存器，它实际上像是：
-
+::: details 查看运行结果
+```asm
+current_el:
+    .cfi_startproc
+    //APP
+    mrs x8, CurrentEL
+    //NO_APP
+    ubfx    x0, x8, #2, #2
+    ret
 ```
-li    a0, 123        // 将 123 存到 a0 寄存器
-csrw  sscratch, a0   // 将 a0 寄存器的值写入到 sscratch 寄存器
-```
+:::
 
-虽然内联汇编中只有 `csrw` 指令，但是 `li` 指令会被编译器自动插入以满足 `"r"` 约束（寄存器中的值）。非常方便！
-
-> [!TIP]
->
-> 内联汇编是一个编译器规范扩展，并不是 C 语言规范。你可以在 [GCC 文档](https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html)中查看详细用法。然而，由于约束语法因 CPU 架构而异，并且它具有许多复杂的功能，因此需要花费一些时间来理解。
->
-> 对于新手而言，我建议寻找真实的例子。例如 [HinaOS](https://github.com/nuta/microkernel-book/blob/52d66bd58cd95424f009e2df8bc1184f6ffd9395/kernel/riscv32/asm.h) 和 [xv6-riscv](https://github.com/mit-pdos/xv6-riscv/blob/riscv/kernel/riscv.h) 都是很好的参考。
+这次编译器选了 `x8` 接收寄存器值，再用 `ubfx x0, x8, #2, #2` 从第 2 位起取出两位，放进返回值寄存器 `x0`。在 EL1 执行时，`CurrentEL` 的编码是 `0b0100`，函数取出第 3、2 位后得到 1。这里在宿主机上做的是交叉编译。真正执行这条特权寄存器读取指令，需要等内核在虚拟机里运行。

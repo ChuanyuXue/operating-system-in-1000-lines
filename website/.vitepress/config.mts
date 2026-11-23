@@ -43,7 +43,7 @@ export default defineConfig({
       items: [
         { link: '/', text: '00. 简介' },
         { link: '/zh/01-setting-up-development-environment', text: '01. 入门' },
-        { link: '/zh/02-assembly', text: '02. RISC-V 101' },
+        { link: '/zh/02-assembly', text: '02. AArch64 101' },
         { link: '/zh/03-overview', text: '03. 总览' },
         { link: '/zh/04-boot', text: '04. 引导' },
         { link: '/zh/05-hello-world', text: '05. Hello World!' },
