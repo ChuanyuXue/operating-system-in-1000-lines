@@ -79,6 +79,8 @@ pub fn add_one(value: u32) -> u32 {
 }
 ```
 
+`rustc` 是 Rust 编译器，这里只有一个 `probe.rs`，我们直接用它生成目标文件。`cargo build` 用来构建整个项目：Cargo 读取 `Cargo.toml`，处理依赖，再调用 `rustc` 编译。
+
 在同一目录里运行：
 
 ```sh
